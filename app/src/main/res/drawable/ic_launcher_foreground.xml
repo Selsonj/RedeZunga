@@ -1,0 +1,49 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    
+    <!-- Outer Crimson pulse network field -->
+    <path
+        android:pathData="M 54 16 A 38 38 0 0 1 54 92 A 38 38 0 0 1 54 16 Z"
+        android:strokeColor="#D32F2F"
+        android:strokeWidth="2"
+        android:strokeAlpha="0.3"
+        android:fillColor="#00000000" />
+
+    <!-- Intermediate Gold pulse ring -->
+    <path
+        android:pathData="M 54 28 A 26 26 0 0 1 54 80 A 26 26 0 0 1 54 28 Z"
+        android:strokeColor="#FFB300"
+        android:strokeWidth="2.5"
+        android:strokeAlpha="0.45"
+        android:fillColor="#00000000" />
+
+    <!-- Connection lines representing Multi-hop routing pathways -->
+    <path
+        android:strokeColor="#FFB300"
+        android:strokeWidth="3"
+        android:strokeLineCap="round"
+        android:pathData="M54,54 L76,32 M54,54 L76,76 M54,54 L32,54" />
+
+    <!-- Core Central Mesh Hub -->
+    <path
+        android:fillColor="#FFB300"
+        android:pathData="M54,45 a9,9 0 1,1 -0.01,0 z" />
+
+    <!-- Node 1 (Top-Right Server) in Crimson -->
+    <path
+        android:fillColor="#D32F2F"
+        android:pathData="M76,25 a7,7 0 1,1 -0.01,0 z" />
+
+    <!-- Node 2 (Bottom-Right Router) in Gold -->
+    <path
+        android:fillColor="#FFB300"
+        android:pathData="M76,69 a7,7 0 1,1 -0.01,0 z" />
+
+    <!-- Node 3 (Left Client) in Gold -->
+    <path
+        android:fillColor="#FFB300"
+        android:pathData="M32,47 a7,7 0 1,1 -0.01,0 z" />
+</vector>

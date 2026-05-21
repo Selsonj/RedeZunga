@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:pathData="M0,0 M0,0h108v108h-108z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="linear"
+                android:startX="0"
+                android:startY="0"
+                android:endX="108"
+                android:endY="108">
+                <item android:offset="0" android:color="#000000" />
+                <item android:offset="0.5" android:color="#0E1116" />
+                <item android:offset="1" android:color="#1A0A0A" />
+            </gradient>
+        </aapt:attr>
+    </path>
+    <!-- Subtle digital mesh network topology grid watermark -->
+    <path
+        android:pathData="M9,0 L9,108 M29,0 L29,108 M49,0 L49,108 M69,0 L69,108 M89,0 L89,108 M0,9 L108,9 M0,29 L108,29 M0,49 L108,49 M0,69 L108,69 M0,89 L108,89"
+        android:strokeColor="#222C3D"
+        android:strokeWidth="1.2" />
+</vector>

@@ -1,0 +1,8 @@
+{
+  "name": "Rede Zunga",
+  "description": "Rede Mesh descentralizada offline-first para comunicação sem internet e sem servidores centralizados.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
