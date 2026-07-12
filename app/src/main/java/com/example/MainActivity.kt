@@ -66,8 +66,66 @@ val TextMuted = Color(0xFF5D5E67) // Secondary Muted Text
 class MainActivity : ComponentActivity() {
     private val viewModel: ZungaViewModel by viewModels()
 
+    private val requestBluetoothLauncher = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == RESULT_OK) {
+            Toast.makeText(this, "Bluetooth ativado com sucesso!", Toast.LENGTH_SHORT).show()
+            viewModel.meshEngine?.startServices()
+        } else {
+            Toast.makeText(this, "O Bluetooth deve estar ativado para a descoberta real.", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    fun checkAndPromptBluetooth() {
+        val bluetoothManager = getSystemService(android.content.Context.BLUETOOTH_SERVICE) as? android.bluetooth.BluetoothManager
+        val adapter = bluetoothManager?.adapter
+        if (adapter != null && !adapter.isEnabled) {
+            try {
+                val enableBtIntent = android.content.Intent(android.bluetooth.BluetoothAdapter.ACTION_REQUEST_ENABLE)
+                requestBluetoothLauncher.launch(enableBtIntent)
+            } catch (e: Exception) {
+                android.util.Log.e("MainActivity", "Sem permissao bluetooth para abrir o dialogo de activacao", e)
+            }
+        }
+    }
+
+    private val requestPermissionLauncher = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions()
+    ) { results ->
+        val deniedCount = results.filter { !it.value }.size
+        if (deniedCount == 0) {
+            Toast.makeText(this, "Permissões de rede próxima concedidas!", Toast.LENGTH_SHORT).show()
+            checkAndPromptBluetooth()
+        } else {
+            Toast.makeText(this, "Algumas permissões foram negadas. O funcionamento offline total pode ser afetado.", Toast.LENGTH_LONG).show()
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        
+        val permissions = mutableListOf(
+            android.Manifest.permission.ACCESS_FINE_LOCATION,
+            android.Manifest.permission.ACCESS_COARSE_LOCATION
+        )
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+            permissions.add(android.Manifest.permission.BLUETOOTH_SCAN)
+            permissions.add(android.Manifest.permission.BLUETOOTH_ADVERTISE)
+            permissions.add(android.Manifest.permission.BLUETOOTH_CONNECT)
+        }
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            permissions.add(android.Manifest.permission.NEARBY_WIFI_DEVICES)
+        }
+        requestPermissionLauncher.launch(permissions.toTypedArray())
+
+        val hasBtConnect = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+            checkSelfPermission(android.Manifest.permission.BLUETOOTH_CONNECT) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        } else true
+        if (hasBtConnect) {
+            checkAndPromptBluetooth()
+        }
+
         enableEdgeToEdge()
         setContent {
             MyApplicationTheme(darkTheme = false) {
@@ -354,20 +412,20 @@ fun SplashScreen(viewModel: ZungaViewModel) {
 fun OnboardingScreen(viewModel: ZungaViewModel) {
     var step by remember { mutableStateOf(1) }
     var inputName by remember { mutableStateOf(viewModel.myNodeName.value) }
-    var selectedLocation by remember { mutableStateOf("Cazenga, Luanda") }
+    var selectedLocation by remember { mutableStateOf("Moçâmedes Centro, Namibe") }
     var generatingKeys by remember { mutableStateOf(false) }
     var keyProgress by remember { mutableStateOf(0.0f) }
     
     val locations = listOf(
-        "Cazenga, Luanda",
-        "Maianga, Luanda",
-        "Cacuaco, Luanda",
-        "Sambizanga, Luanda",
-        "Benguela Central, Benguela",
-        "Lobito Restinga, Lobito",
-        "Vila de Catumbela, Benguela",
-        "Sumbe Centro, Cuanza Sul",
-        "Uíge Capital, Uíge"
+        "Moçâmedes Centro, Namibe",
+        "Praia Amélia, Moçâmedes",
+        "Bairro Facim, Moçâmedes",
+        "Torre do Tombo, Moçâmedes",
+        "Saco Mar, Moçâmedes",
+        "Aeroporto, Moçâmedes",
+        "Bibala, Namibe",
+        "Camucuio, Namibe",
+        "Tômbua, Namibe"
     )
 
     Column(
@@ -698,11 +756,10 @@ fun ChatsTab(
                         fontWeight = FontWeight.Bold,
                         color = TextLight
                     )
-                    val isSim by viewModel.isSimulatorMode.collectAsStateWithLifecycle()
                     Text(
-                        text = if (isSim) "Modo Simulador de Mesh" else "Dispositivos Wi-Fi NSD ativos",
+                        text = "Dispositivos Wi-Fi NSD ativos",
                         fontSize = 13.sp,
-                        color = if (isSim) GoldAccent else EmeraldConnected,
+                        color = EmeraldConnected,
                         modifier = Modifier.padding(top = 2.dp)
                     )
                 }
@@ -721,6 +778,10 @@ fun ChatsTab(
             }
 
             Spacer(modifier = Modifier.height(16.dp))
+
+            HardwareStatusBanner()
+
+            Spacer(modifier = Modifier.height(8.dp))
 
             // Sub title
             Text(
@@ -951,87 +1012,292 @@ fun ChatsTab(
 }
 
 @Composable
+fun HardwareStatusBanner() {
+    val context = LocalContext.current
+    var isBtEnabled by remember { mutableStateOf(true) }
+    var isWifiEnabled by remember { mutableStateOf(true) }
+    var isLocationEnabled by remember { mutableStateOf(true) }
+
+    // Run active hardware status checks reactively
+    LaunchedEffect(Unit) {
+        while (true) {
+            val bluetoothManager = context.getSystemService(android.content.Context.BLUETOOTH_SERVICE) as? android.bluetooth.BluetoothManager
+            isBtEnabled = bluetoothManager?.adapter?.isEnabled == true
+
+            val wifiManager = context.applicationContext.getSystemService(android.content.Context.WIFI_SERVICE) as? android.net.wifi.WifiManager
+            isWifiEnabled = wifiManager?.isWifiEnabled == true
+
+            val locationManager = context.getSystemService(android.content.Context.LOCATION_SERVICE) as? android.location.LocationManager
+            isLocationEnabled = locationManager?.isProviderEnabled(android.location.LocationManager.GPS_PROVIDER) == true ||
+                                locationManager?.isProviderEnabled(android.location.LocationManager.NETWORK_PROVIDER) == true
+
+            delay(2000) // check status every 2 seconds
+        }
+    }
+
+    if (!isBtEnabled || !isWifiEnabled || !isLocationEnabled) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = 12.dp)
+                .clip(RoundedCornerShape(12.dp))
+                .background(Color(0xFFFFDAD6))
+                .border(1.dp, Color(0xFFBA1A1A), RoundedCornerShape(12.dp))
+                .padding(12.dp)
+        ) {
+            Text(
+                text = "ALERTA: HARDWARE AD-HOC INATIVO",
+                color = Color(0xFF410002),
+                fontWeight = FontWeight.Bold,
+                fontSize = 13.sp
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = "Para que a descoberta local real funcione entre aparelhos sem internet na província do Namibe, o Wi-Fi, Bluetooth e GPS (Localização) devem estar ativados.",
+                color = Color(0xFF410002),
+                fontSize = 11.sp
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                if (!isBtEnabled) {
+                    Button(
+                        onClick = {
+                            try {
+                                val enableBtIntent = android.content.Intent(android.bluetooth.BluetoothAdapter.ACTION_REQUEST_ENABLE)
+                                context.startActivity(enableBtIntent)
+                            } catch (e: Exception) {
+                                Toast.makeText(context, "Ative o Bluetooth nas configurações rápidas do aparelho.", Toast.LENGTH_LONG).show()
+                            }
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFBA1A1A)),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                        modifier = Modifier.height(34.dp)
+                    ) {
+                        Icon(Icons.Filled.Bluetooth, contentDescription = null, modifier = Modifier.size(16.dp), tint = Color.White)
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("ATIVAR BT", fontSize = 10.sp, color = Color.White)
+                    }
+                }
+                if (!isWifiEnabled) {
+                    Button(
+                        onClick = {
+                            try {
+                                if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.Q) {
+                                    val wifiManager = context.applicationContext.getSystemService(android.content.Context.WIFI_SERVICE) as? android.net.wifi.WifiManager
+                                    wifiManager?.isWifiEnabled = true
+                                } else {
+                                    context.startActivity(android.content.Intent(android.provider.Settings.ACTION_WIFI_SETTINGS))
+                                }
+                            } catch (e: Exception) {
+                                Toast.makeText(context, "Ative o Wi-Fi nas configurações.", Toast.LENGTH_SHORT).show()
+                            }
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFBA1A1A)),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                        modifier = Modifier.height(34.dp)
+                    ) {
+                        Icon(Icons.Filled.Wifi, contentDescription = null, modifier = Modifier.size(16.dp), tint = Color.White)
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("ATIVAR WI-FI", fontSize = 10.sp, color = Color.White)
+                    }
+                }
+                if (!isLocationEnabled) {
+                    Button(
+                        onClick = {
+                            try {
+                                context.startActivity(android.content.Intent(android.provider.Settings.ACTION_LOCATION_SOURCE_SETTINGS))
+                            } catch (e: Exception) {}
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFBA1A1A)),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                        modifier = Modifier.height(34.dp)
+                    ) {
+                        Icon(Icons.Filled.LocationOn, contentDescription = null, modifier = Modifier.size(16.dp), tint = Color.White)
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("ATIVAR GPS", fontSize = 10.sp, color = Color.White)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun OfflineConnectionAssistant(viewModel: ZungaViewModel) {
+    val context = LocalContext.current
+    var isExpanded by remember { mutableStateOf(false) }
+    val connectionStatus by viewModel.connectionStatus.collectAsStateWithLifecycle()
+
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp),
+        colors = CardDefaults.cardColors(containerColor = SlateCard),
+        shape = RoundedCornerShape(16.dp),
+        border = androidx.compose.foundation.BorderStroke(1.dp, GoldAccent.copy(alpha = 0.35f))
+    ) {
+        Column(modifier = Modifier.padding(14.dp)) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { isExpanded = !isExpanded },
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Filled.WifiTethering,
+                        contentDescription = "Hotspot",
+                        tint = GoldAccent,
+                        modifier = Modifier.size(24.dp)
+                    )
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Column {
+                        Text(
+                            text = "Ligar Aparelhos Estranhos",
+                            color = TextLight,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "Como funciona a conexão sem roteador?",
+                            color = TextMuted,
+                            fontSize = 11.sp
+                        )
+                    }
+                }
+                Icon(
+                    imageVector = if (isExpanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                    contentDescription = "Expandir",
+                    tint = GoldAccent
+                )
+            }
+
+            if (isExpanded) {
+                Spacer(modifier = Modifier.height(14.dp))
+                
+                Text(
+                    text = "Para que telemóveis novos ou estranhos se conectem sem internet nem roteador doméstico, o ZungaMesh permite buscar e aceder a redes locais ad-hoc nas proximidades do Namibe de forma imediata.",
+                    color = TextMuted,
+                    fontSize = 11.sp,
+                    lineHeight = 15.sp
+                )
+
+                Spacer(modifier = Modifier.height(14.dp))
+
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(SlateCardSecondary)
+                        .padding(12.dp)
+                ) {
+                    Text(
+                        text = "CONEXÃO P2P DIRECTA",
+                        color = GoldAccent,
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = "Unir à Rede do Vizinho",
+                        color = TextLight,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(vertical = 4.dp)
+                    )
+                    Text(
+                        text = "O sistema ligará o seu Wi-Fi diretamente ao ponto de transmissão offline 'ZungaMesh' mais próximo e restabelecerá a comunicação local para chats e chamadas.",
+                        color = TextMuted,
+                        fontSize = 11.sp,
+                        lineHeight = 14.sp
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Button(
+                        onClick = { viewModel.connectToZungaHotspot(context) },
+                        colors = ButtonDefaults.buttonColors(containerColor = EmeraldConnected, contentColor = Color.White),
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.fillMaxWidth().height(40.dp)
+                    ) {
+                        Icon(Icons.Filled.Wifi, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("PROCURAR E UNIR VIZINHO", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+
+                if (connectionStatus != null) {
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(GoldAccent.copy(alpha = 0.12f))
+                            .padding(8.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                text = connectionStatus ?: "",
+                                color = TextLight,
+                                fontSize = 11.sp,
+                                modifier = Modifier.weight(1f)
+                            )
+                            IconButton(
+                                onClick = { viewModel.resetConnectionStatus() },
+                                modifier = Modifier.size(20.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.Close,
+                                    contentDescription = "Fechar",
+                                    tint = TextMuted,
+                                    modifier = Modifier.size(14.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 fun PeersTab(viewModel: ZungaViewModel, peers: List<PeerEntity>) {
-    var showAddNodeDialog by remember { mutableStateOf(false) }
-    var inputName by remember { mutableStateOf("") }
-    var inputLoc by remember { mutableStateOf("Maianga, Luanda") }
-    var inputModel by remember { mutableStateOf("Tecno Spark 10") }
-    var inputIsDirect by remember { mutableStateOf(true) }
-    
     Column(
         modifier = Modifier
             .fillMaxSize()
             .padding(16.dp)
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column {
-                Text(
-                    text = "Vizinhos Próximos",
-                    fontSize = 28.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = TextLight
-                )
-                Text(
-                    text = "${peers.count { it.isDirectNeighbor }} conexões diretas activas",
-                    fontSize = 14.sp,
-                    color = GoldAccent
-                )
-            }
-
-            IconButton(
-                onClick = { showAddNodeDialog = true },
-                modifier = Modifier
-                    .background(SlateCard, CircleShape)
-                    .border(1.dp, GoldAccent, CircleShape)
-            ) {
-                Icon(Icons.Filled.Add, contentDescription = "Simular Nó", tint = GoldAccent)
-            }
-        }
-
-        Spacer(modifier = Modifier.height(16.dp))
-
-        // Toggle real / test simulation network
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(12.dp))
-                .background(SlateCard)
-                .padding(12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(
-                    imageVector = Icons.Filled.WifiTethering,
-                    contentDescription = "Simular",
-                    tint = GoldAccent,
-                    modifier = Modifier.size(28.dp)
-                )
-                Spacer(modifier = Modifier.width(12.dp))
-                Column {
-                    Text("Gerador de Peers Artificiais", color = TextLight, fontSize = 14.sp, fontWeight = FontWeight.Bold)
-                    Text("Simula topologia avançada offline", color = TextMuted, fontSize = 11.sp)
-                }
-            }
-            
-            val isSimMode by viewModel.isSimulatorMode.collectAsStateWithLifecycle()
-            Switch(
-                checked = isSimMode,
-                onCheckedChange = { viewModel.setSimulatorMode(it) },
-                colors = SwitchDefaults.colors(
-                    checkedThumbColor = SlateBackground,
-                    checkedTrackColor = GoldAccent,
-                    uncheckedThumbColor = TextMuted,
-                    uncheckedTrackColor = SlateCardSecondary
-                )
+        Column {
+            Text(
+                text = "Vizinhos Próximos",
+                fontSize = 28.sp,
+                fontWeight = FontWeight.Bold,
+                color = TextLight
+            )
+            val directCount = peers.count { it.isDirectNeighbor }
+            Text(
+                text = if (directCount == 1) "1 dispositivo próximo" else "$directCount dispositivos próximos",
+                fontSize = 14.sp,
+                color = EmeraldConnected,
+                modifier = Modifier.padding(top = 2.dp)
             )
         }
 
         Spacer(modifier = Modifier.height(16.dp))
+
+        HardwareStatusBanner()
+
+        Spacer(modifier = Modifier.height(4.dp))
+
+        OfflineConnectionAssistant(viewModel)
+
+        Spacer(modifier = Modifier.height(8.dp))
 
         if (peers.isEmpty()) {
             Box(
@@ -1044,10 +1310,11 @@ fun PeersTab(viewModel: ZungaViewModel, peers: List<PeerEntity>) {
                     CircularProgressIndicator(color = GoldAccent)
                     Spacer(modifier = Modifier.height(16.dp))
                     Text(
-                        text = "Escaneando canais locais via Wi-Fi NSD e Bluetooth...",
+                        text = "Escaneando vizinhos locais via Wi-Fi NSD e Bluetooth...\nCertifique-se de que o outro dispositivo tem o ZungaMesh aberto.",
                         color = TextMuted,
                         fontSize = 13.sp,
-                        textAlign = TextAlign.Center
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.padding(horizontal = 24.dp)
                     )
                 }
             }
@@ -1120,7 +1387,7 @@ fun PeersTab(viewModel: ZungaViewModel, peers: List<PeerEntity>) {
                             // Quick action triggers
                             Row {
                                 IconButton(
-                                    onClick = { viewModel.initiateVoiceCall(peer.name) }
+                                    onClick = { viewModel.initiateVoiceCall(peer.id, peer.name) }
                                 ) {
                                     Icon(Icons.Filled.Phone, contentDescription = "Ligar", tint = GoldAccent)
                                 }
@@ -1132,88 +1399,6 @@ fun PeersTab(viewModel: ZungaViewModel, peers: List<PeerEntity>) {
                                     Icon(Icons.Filled.Chat, contentDescription = "Chat", tint = TextLight)
                                 }
                             }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Add node simulation dialog popup
-    if (showAddNodeDialog) {
-        Dialog(onDismissRequest = { showAddNodeDialog = false }) {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(16.dp))
-                    .background(SlateCard)
-                    .padding(20.dp)
-            ) {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text("Gerar Novo Vizinho P2P", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = TextLight)
-
-                    OutlinedTextField(
-                        value = inputName,
-                        onValueChange = { inputName = it },
-                        label = { Text("Nome do Contacto", color = GoldAccent) },
-                        colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = GoldAccent, unfocusedBorderColor = TextMuted),
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-
-                    OutlinedTextField(
-                        value = inputLoc,
-                        onValueChange = { inputLoc = it },
-                        label = { Text("Localidade (ex: Sumbe, Cazenga)", color = GoldAccent) },
-                        colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = GoldAccent, unfocusedBorderColor = TextMuted),
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-
-                    OutlinedTextField(
-                        value = inputModel,
-                        onValueChange = { inputModel = it },
-                        label = { Text("Modelo do Smartphone", color = GoldAccent) },
-                        colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = GoldAccent, unfocusedBorderColor = TextMuted),
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text("Alcance físico direto?", color = TextLight, fontSize = 14.sp)
-                        Checkbox(
-                            checked = inputIsDirect,
-                            onCheckedChange = { inputIsDirect = it },
-                            colors = CheckboxDefaults.colors(checkedColor = GoldAccent, uncheckedColor = TextMuted)
-                        )
-                    }
-
-                    Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
-                        TextButton(onClick = { showAddNodeDialog = false }) {
-                            Text("CANCELAR", color = TextMuted)
-                        }
-                        Spacer(modifier = Modifier.width(12.dp))
-                        Button(
-                            onClick = {
-                                if (inputName.trim().isNotEmpty()) {
-                                    viewModel.addCustomMockNode(
-                                        inputName,
-                                        inputLoc,
-                                        inputModel,
-                                        inputIsDirect,
-                                        if (inputIsDirect) "WIFI_DIRECT" else "WIFI"
-                                    )
-                                    inputName = ""
-                                    showAddNodeDialog = false
-                                }
-                            },
-                            colors = ButtonDefaults.buttonColors(containerColor = GoldAccent, contentColor = SlateBackground)
-                        ) {
-                            Text("SIMULAR", fontWeight = FontWeight.Bold)
                         }
                     }
                 }
@@ -1233,7 +1418,7 @@ fun MeshMapTab(viewModel: ZungaViewModel, peers: List<PeerEntity>) {
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Text(
-            text = "Mapa da Rede Mesh Luanda",
+            text = "Mapa da Rede Mesh Namibe",
             fontSize = 24.sp,
             fontWeight = FontWeight.Bold,
             color = TextLight,
@@ -1541,21 +1726,6 @@ fun ProfileTab(viewModel: ZungaViewModel, name: String, location: String) {
         }
 
         Spacer(modifier = Modifier.weight(1f))
-
-        // Trigger simulated incoming call
-        OutlinedButton(
-            onClick = { viewModel.receiveSimulatedVoiceCall("Kelson (Cacuaco)") },
-            border = ButtonDefaults.outlinedButtonBorder.copy(width = 1.dp),
-            colors = ButtonDefaults.outlinedButtonColors(contentColor = GoldAccent),
-            shape = RoundedCornerShape(12.dp),
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(50.dp)
-        ) {
-            Icon(Icons.Filled.CallReceived, contentDescription = "Simulate Voip Incoming")
-            Spacer(modifier = Modifier.width(8.dp))
-            Text("Simular Receber Ligação de Voz Mesh")
-        }
     }
 }
 
@@ -1621,7 +1791,7 @@ fun ChatRoomScreen(
             }
 
             if (!isGroup) {
-                IconButton(onClick = { viewModel.initiateVoiceCall(name) }) {
+                IconButton(onClick = { viewModel.initiateVoiceCall(id, name) }) {
                     Icon(Icons.Filled.Phone, contentDescription = "Voz", tint = GoldAccent)
                 }
             }

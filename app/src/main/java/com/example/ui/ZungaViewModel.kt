@@ -58,7 +58,7 @@ class ZungaViewModel(application: Application) : AndroidViewModel(application) {
     private val _myNodeName = MutableStateFlow(meshEngine?.myNodeName ?: "Zunga Node")
     val myNodeName = _myNodeName.asStateFlow()
 
-    private val _myLocation = MutableStateFlow(meshEngine?.myLocation ?: "Luanda, Angola")
+    private val _myLocation = MutableStateFlow(meshEngine?.myLocation ?: "Moçâmedes, Namibe")
     val myLocation = _myLocation.asStateFlow()
 
     private val _isBatterySaver = MutableStateFlow(false)
@@ -97,7 +97,7 @@ class ZungaViewModel(application: Application) : AndroidViewModel(application) {
         }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    // Voice call simulation details
+    // Voice call details
     private val _callStateStr = MutableStateFlow("DISCONNECTED") // "RINGING", "CONNECTED", "DISCONNECTED"
     val callStateStr = _callStateStr.asStateFlow()
 
@@ -105,6 +105,9 @@ class ZungaViewModel(application: Application) : AndroidViewModel(application) {
     val callDurationCount = _callDurationCount.asStateFlow()
 
     private var callTimerJob: Job? = null
+
+    var activeCallPeerId: String? = null
+    var activeCallPeerName: String? = null
 
     init {
         val engine = meshEngine
@@ -115,6 +118,37 @@ class ZungaViewModel(application: Application) : AndroidViewModel(application) {
             // Sync local settings UI with engine
             _myNodeName.value = engine.myNodeName
             _myLocation.value = engine.myLocation
+
+            // Register real call events listener across the local mesh network
+            engine.setOnCallSignalReceivedListener { senderId, senderName, signal ->
+                when (signal) {
+                    "RINGING" -> {
+                        activeCallPeerId = senderId
+                        activeCallPeerName = senderName
+                        _callStateStr.value = "RINGING"
+                        navigateTo(ZungaScreen.VoiceCall(senderName, isIncoming = true))
+                    }
+                    "ACCEPTED" -> {
+                        _callStateStr.value = "CONNECTED"
+                        _callDurationCount.value = 0
+                        callTimerJob?.cancel()
+                        callTimerJob = viewModelScope.launch {
+                            while (_callStateStr.value == "CONNECTED") {
+                                delay(1000)
+                                _callDurationCount.value += 1
+                            }
+                        }
+                    }
+                    "HANGUP" -> {
+                        _callStateStr.value = "DISCONNECTED"
+                        callTimerJob?.cancel()
+                        _callDurationCount.value = 0
+                        activeCallPeerId = null
+                        activeCallPeerName = null
+                        navigateTo(ZungaScreen.Dashboard)
+                    }
+                }
+            }
         }
     }
 
@@ -201,34 +235,25 @@ class ZungaViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    // Add a custom simulator node
+    // Add a custom simulator node (dormant/removed)
     fun addCustomMockNode(name: String, location: String, model: String, isDirect: Boolean, connectionType: String) {
-        meshEngine?.addSimulatedPeer(name, location, model, isDirect, connectionType)
+        // Disabled simulation features
     }
 
-    // Direct remove peer
+    // Direct remove peer (dormant/removed)
     fun removeSimulatorNode(id: String) {
-        meshEngine?.removeSimulatedPeer(id)
+        // Disabled simulation features
     }
 
     // Voice call controls
-    fun initiateVoiceCall(peerName: String) {
+    fun initiateVoiceCall(peerId: String, peerName: String) {
+        activeCallPeerId = peerId
+        activeCallPeerName = peerName
         navigateTo(ZungaScreen.VoiceCall(peerName, isIncoming = false))
         _callStateStr.value = "RINGING"
         
-        viewModelScope.launch {
-            delay(1500) // Simulate recipient pickup delay
-            _callStateStr.value = "CONNECTED"
-            _callDurationCount.value = 0
-            
-            callTimerJob?.cancel()
-            callTimerJob = viewModelScope.launch {
-                while (_callStateStr.value == "CONNECTED") {
-                    delay(1000)
-                    _callDurationCount.value += 1
-                }
-            }
-        }
+        // Transmit real telephony ringing invitation packet
+        meshEngine?.sendCallSignaling(peerId, "RINGING", peerName)
     }
 
     fun receiveSimulatedVoiceCall(peerName: String) {
@@ -237,8 +262,14 @@ class ZungaViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun acceptCall() {
+        val callerId = activeCallPeerId ?: return
+        val callerName = activeCallPeerName ?: "Zunga Peer"
         _callStateStr.value = "CONNECTED"
         _callDurationCount.value = 0
+        
+        // Transmit real telephony accept packet back to caller
+        meshEngine?.sendCallSignaling(callerId, "ACCEPTED", callerName)
+
         callTimerJob?.cancel()
         callTimerJob = viewModelScope.launch {
             while (_callStateStr.value == "CONNECTED") {
@@ -249,10 +280,83 @@ class ZungaViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun hangUpCall() {
+        val targetId = activeCallPeerId
+        if (targetId != null) {
+            // Transmit real telephony hang up packet
+            meshEngine?.sendCallSignaling(targetId, "HANGUP", activeCallPeerName ?: "Zunga Peer")
+        }
+        
         _callStateStr.value = "DISCONNECTED"
         callTimerJob?.cancel()
         _callDurationCount.value = 0
+        activeCallPeerId = null
+        activeCallPeerName = null
         navigateTo(ZungaScreen.Dashboard)
+    }
+
+    private val _connectionStatus = MutableStateFlow<String?>(null)
+    val connectionStatus = _connectionStatus.asStateFlow()
+
+    fun resetConnectionStatus() {
+        _connectionStatus.value = null
+    }
+
+    fun connectToZungaHotspot(context: android.content.Context) {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+            val connectivityManager = context.getSystemService(android.content.Context.CONNECTIVITY_SERVICE) as? android.net.ConnectivityManager
+            if (connectivityManager == null) {
+                _connectionStatus.value = "Erro: Serviço de Conectividade indisponível."
+                return
+            }
+
+            val specifier = android.net.wifi.WifiNetworkSpecifier.Builder()
+                .setSsidPattern(android.os.PatternMatcher("ZungaMesh", android.os.PatternMatcher.PATTERN_PREFIX))
+                .build()
+
+            val request = android.net.NetworkRequest.Builder()
+                .addTransportType(android.net.NetworkCapabilities.TRANSPORT_WIFI)
+                .removeCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                .setNetworkSpecifier(specifier)
+                .build()
+
+            _connectionStatus.value = "A procurar hotspots ZungaMesh próximos..."
+
+            try {
+                connectivityManager.requestNetwork(request, object : android.net.ConnectivityManager.NetworkCallback() {
+                    override fun onAvailable(network: android.net.Network) {
+                        super.onAvailable(network)
+                        try {
+                            connectivityManager.bindProcessToNetwork(network)
+                            _connectionStatus.value = "Conectado à rede 'ZungaMesh'! Descobrindo vizinhos..."
+                        } catch (e: Exception) {
+                            _connectionStatus.value = "Erro ao associar rede: ${e.localizedMessage}"
+                        }
+                    }
+
+                    override fun onUnavailable() {
+                        super.onUnavailable()
+                        _connectionStatus.value = "Nenhum hotspot ZungaMesh ativo encontrado de momento."
+                    }
+
+                    override fun onLost(network: android.net.Network) {
+                        super.onLost(network)
+                        try {
+                            connectivityManager.bindProcessToNetwork(null)
+                        } catch (e: Exception) {}
+                        _connectionStatus.value = "Conexão P2P com vizinho desligada."
+                    }
+                })
+            } catch (e: Exception) {
+                _connectionStatus.value = "Erro ao tentar conectar: ${e.localizedMessage}"
+            }
+        } else {
+            _connectionStatus.value = "Versão antiga do Android. Redirecionando para Definições de Wi-Fi..."
+            try {
+                context.startActivity(android.content.Intent(android.provider.Settings.ACTION_WIFI_SETTINGS))
+            } catch (e: Exception) {
+                _connectionStatus.value = "Abra manualmente as Definições de Wi-Fi no seu telemóvel."
+            }
+        }
     }
 
     override fun onCleared() {

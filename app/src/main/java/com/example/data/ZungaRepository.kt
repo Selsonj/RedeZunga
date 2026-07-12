@@ -19,19 +19,13 @@ class ZungaRepository(
     private val groupDao = database.groupDao()
     private val routeHopDao = database.routeHopDao()
 
-    // Observe active peers, combining real peers or simulated peers based on simulator mode toggled in UI
+    // Observe active peers, combining real peers and database peers
     val activePeersFlow: Flow<List<PeerEntity>> = combine(
-        meshEngine.isSimulatorMode,
         meshEngine.realPeers,
-        meshEngine.simulatedPeers,
         peerDao.getAllPeers()
-    ) { isSim, realList, simList, dbList ->
-        if (isSim) {
-            simList
-        } else {
-            // Merge DB discovered peers with memory real status
-            (realList + dbList).distinctBy { it.id }
-        }
+    ) { realList, dbList ->
+        // Merge DB discovered peers with memory real status
+        (realList + dbList).distinctBy { it.id }
     }
 
     // Direct conversations list
@@ -81,7 +75,7 @@ class ZungaRepository(
                 groupDao.insertGroup(
                     GroupEntity(
                         id = "grupo-angola-geral",
-                        name = "Comunidade Geral - Luanda",
+                        name = "Comunidade Geral - Namibe",
                         creatorId = "sistema-zunga",
                         membersCount = 37
                     )
@@ -91,7 +85,7 @@ class ZungaRepository(
                 groupDao.insertGroup(
                     GroupEntity(
                         id = "grupo-mercado-cazenga",
-                        name = "Mercado do Asa Branca - Trocas",
+                        name = "Mercado de Trocas Moçâmedes",
                         creatorId = "sistema-zunga",
                         membersCount = 14
                     )
@@ -128,15 +122,14 @@ class ZungaRepository(
             val peer = peerDao.getPeerById(recipientId)
             if (peer == null) {
                 // Insert a placeholder to prevent missing lists
-                val simulatorPeer = meshEngine.simulatedPeers.value.find { it.id == recipientId }
                 val realPeer = meshEngine.realPeers.value.find { it.id == recipientId }
-                val resolvedModel = simulatorPeer?.deviceModel ?: (realPeer?.deviceModel ?: "Ativo")
-                val resolvedLoc = simulatorPeer?.location ?: (realPeer?.location ?: "Próximo")
+                val resolvedModel = realPeer?.deviceModel ?: "Ativo"
+                val resolvedLoc = realPeer?.location ?: "Próximo"
                 
                 peerDao.insertPeer(
                     PeerEntity(
                         id = recipientId,
-                        name = simulatorPeer?.name ?: (realPeer?.name ?: "Zunga Peer"),
+                        name = realPeer?.name ?: "Zunga Peer",
                         deviceModel = resolvedModel,
                         location = resolvedLoc,
                         isDirectNeighbor = true
