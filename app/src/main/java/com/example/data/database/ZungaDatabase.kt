@@ -10,9 +10,10 @@ import androidx.room.RoomDatabase
         PeerEntity::class,
         MessageEntity::class,
         GroupEntity::class,
-        RouteHopEntity::class
+        RouteHopEntity::class,
+        RouteTable::class
     ],
-    version = 2,
+    version = 3,
     exportSchema = false
 )
 abstract class ZungaDatabase : RoomDatabase() {
@@ -20,6 +21,7 @@ abstract class ZungaDatabase : RoomDatabase() {
     abstract fun messageDao(): MessageDao
     abstract fun groupDao(): GroupDao
     abstract fun routeHopDao(): RouteHopDao
+    abstract fun routeTableDao(): RouteTableDao
 
     companion object {
         @Volatile

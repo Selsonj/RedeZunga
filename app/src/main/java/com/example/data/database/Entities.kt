@@ -46,6 +46,15 @@ data class GroupEntity(
     val membersCount: Int = 1
 )
 
+@Entity(tableName = "route_table")
+data class RouteTable(
+    @PrimaryKey val destinationNodeId: String,
+    val nextHopNodeId: String,
+    val hopCount: Int,
+    val lastSeen: Long = System.currentTimeMillis(),
+    val connectionType: String = "WIFI"
+)
+
 @Entity(tableName = "route_hops")
 data class RouteHopEntity(
     @PrimaryKey(autoGenerate = true) val id: Int = 0,

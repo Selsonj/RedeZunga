@@ -82,3 +82,21 @@ interface RouteHopDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertHop(hop: RouteHopEntity)
 }
+
+@Dao
+interface RouteTableDao {
+    @Query("SELECT * FROM route_table")
+    fun getAllRoutes(): Flow<List<RouteTable>>
+
+    @Query("SELECT * FROM route_table WHERE destinationNodeId = :dest LIMIT 1")
+    suspend fun getRoute(dest: String): RouteTable?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertRoute(route: RouteTable)
+
+    @Query("DELETE FROM route_table WHERE destinationNodeId = :dest")
+    suspend fun deleteRoute(dest: String)
+
+    @Query("DELETE FROM route_table")
+    suspend fun clearRoutes()
+}

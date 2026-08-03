@@ -115,6 +115,24 @@ object ZungaCryptography {
     }
 
     /**
+     * Encrypts content using AES-256-CBC, returning a Pair of (Ciphertext Base64, IV Base64).
+     */
+    fun encryptAESWithIv(plainText: String, secretKey: SecretKey): Pair<String, String> {
+        val cipher = Cipher.getInstance(AES_PADDING)
+        val iv = ByteArray(16)
+        SecureRandom().nextBytes(iv)
+        val ivSpec = IvParameterSpec(iv)
+        
+        cipher.init(Cipher.ENCRYPT_MODE, secretKey, ivSpec)
+        val encryptedBytes = cipher.doFinal(plainText.toByteArray(Charsets.UTF_8))
+        
+        val encryptedBase64 = Base64.encodeToString(encryptedBytes, Base64.NO_WRAP)
+        val ivBase64 = Base64.encodeToString(iv, Base64.NO_WRAP)
+        
+        return Pair(encryptedBase64, ivBase64)
+    }
+
+    /**
      * Decrypt AES-encrypted content.
      */
     fun decryptAES(combinedBase64: String, secretKey: SecretKey): String {
@@ -130,6 +148,20 @@ object ZungaCryptography {
         cipher.init(Cipher.DECRYPT_MODE, secretKey, ivSpec)
         val decryptedBytes = cipher.doFinal(encryptedBytes)
         
+        return String(decryptedBytes, Charsets.UTF_8)
+    }
+
+    /**
+     * Decrypts content using AES-256-CBC and an explicit IV.
+     */
+    fun decryptAESWithIv(encryptedBase64: String, ivBase64: String, secretKey: SecretKey): String {
+        val cipher = Cipher.getInstance(AES_PADDING)
+        val encryptedBytes = Base64.decode(encryptedBase64, Base64.NO_WRAP)
+        val iv = Base64.decode(ivBase64, Base64.NO_WRAP)
+        val ivSpec = IvParameterSpec(iv)
+        
+        cipher.init(Cipher.DECRYPT_MODE, secretKey, ivSpec)
+        val decryptedBytes = cipher.doFinal(encryptedBytes)
         return String(decryptedBytes, Charsets.UTF_8)
     }
 

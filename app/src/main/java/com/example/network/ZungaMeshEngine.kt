@@ -37,6 +37,23 @@ class ZungaMeshEngine(
     private val keyPair by lazy { ZungaCryptography.generateKeyPair() }
     val myPublicKeyString by lazy { ZungaCryptography.publicKeyToString(keyPair.public) }
 
+    // Thread-safe map to store discovered peer public keys
+    private val peerPublicKeys = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    // Instância do MeshRouter para roteamento dinâmico multi-hop
+    private val database by lazy { com.example.data.database.ZungaDatabase.getDatabase(context) }
+    val meshRouter by lazy {
+        MeshRouter(
+            myNodeId = myNodeId,
+            myNodeName = myNodeName,
+            database = database,
+            scope = scope,
+            getDirectNeighbors = { _realPeers.value },
+            transmitPacket = ::transmitRawPacket,
+            onLocalMessageReceived = ::processLocalPacket
+        )
+    }
+
     // State flows
     private val _realPeers = MutableStateFlow<List<PeerEntity>>(emptyList())
     val realPeers = _realPeers.asStateFlow()
@@ -66,61 +83,37 @@ class ZungaMeshEngine(
     private var advertiseCallback: android.bluetooth.le.AdvertiseCallback? = null
     private var scanCallback: android.bluetooth.le.ScanCallback? = null
 
-    // Wi-Fi Direct References
-    private val wifiP2pManager by lazy { context.getSystemService(Context.WIFI_P2P_SERVICE) as? android.net.wifi.p2p.WifiP2pManager }
-    private var wifiP2pChannel: android.net.wifi.p2p.WifiP2pManager.Channel? = null
-    
-    // Wi-Fi Direct Broadcast Receiver
-    private val wifiP2pReceiver = object : android.content.BroadcastReceiver() {
-        override fun onReceive(ctx: Context, intent: android.content.Intent) {
-            when (intent.action) {
-                android.net.wifi.p2p.WifiP2pManager.WIFI_P2P_PEERS_CHANGED_ACTION -> {
-                    try {
-                        wifiP2pManager?.requestPeers(wifiP2pChannel) { peerList ->
-                            val p2pPeers = peerList.deviceList.map { device ->
-                                PeerEntity(
-                                    id = "p2p-${device.deviceAddress}",
-                                    name = device.deviceName,
-                                    deviceModel = "Wi-Fi Direct [${device.deviceAddress}]",
-                                    location = "Moçâmedes Link",
-                                    isDirectNeighbor = true,
-                                    connectionType = "WIFI_DIRECT"
-                                )
-                            }
-                            val updatedList = _realPeers.value.toMutableList().apply {
-                                removeAll { it.id.startsWith("p2p-") }
-                                addAll(p2pPeers)
-                            }
-                            _realPeers.value = updatedList
-                        }
-                    } catch (e: SecurityException) {
-                        Log.e(TAG, "No permission to request WIFI_DIRECT peers", e)
+    // Wi-Fi Direct Transport Layer
+    private val wifiDirectTransport by lazy {
+        com.example.network.transport.WifiDirectTransport(
+            context = context,
+            scope = scope,
+            onPeersDiscovered = { p2pPeers ->
+                val updatedList = _realPeers.value.toMutableList().apply {
+                    removeAll { it.id.startsWith("p2p-") }
+                    addAll(p2pPeers)
+                }
+                _realPeers.value = updatedList
+            },
+            onConnectionEstablished = { groupOwnerIp, isGroupOwner ->
+                if (!isGroupOwner) {
+                    connectToNeighbor(groupOwnerIp, DEFAULT_PORT, "WifiP2p GO")
+                }
+            },
+            onConnectionLost = {
+                val updatedList = _realPeers.value.map {
+                    if (it.id.startsWith("p2p-") || it.connectionType == "WIFI_DIRECT") {
+                        it.copy(isDirectNeighbor = false)
+                    } else {
+                        it
                     }
                 }
-                android.net.wifi.p2p.WifiP2pManager.WIFI_P2P_CONNECTION_CHANGED_ACTION -> {
-                    val networkInfo = intent.getParcelableExtra<android.net.NetworkInfo>(android.net.wifi.p2p.WifiP2pManager.EXTRA_NETWORK_INFO)
-                    if (networkInfo?.isConnected == true) {
-                        try {
-                            wifiP2pManager?.requestConnectionInfo(wifiP2pChannel) { info ->
-                                if (info.groupFormed) {
-                                    if (info.isGroupOwner) {
-                                        Log.d(TAG, "Wifi Direct GO formed. Port listening is at $DEFAULT_PORT")
-                                    } else {
-                                        val goIp = info.groupOwnerAddress?.hostAddress
-                                        if (goIp != null) {
-                                            Log.d(TAG, "Wifi Direct Client. Connect to Owner at $goIp")
-                                            connectToNeighbor(goIp, DEFAULT_PORT, "WifiP2p GO")
-                                        }
-                                    }
-                                }
-                            }
-                        } catch (e: SecurityException) {
-                            Log.e(TAG, "No permission to request connectivity info", e)
-                        }
-                    }
-                }
+                _realPeers.value = updatedList
+            },
+            onStateChanged = { stateName ->
+                Log.d(TAG, "[WIFI_DIRECT] Estado alterado: $stateName")
             }
-        }
+        )
     }
 
     // Message listener to pipe incoming messages down to ViewModel
@@ -187,28 +180,8 @@ class ZungaMeshEngine(
             }
         }
 
-        // 3. Start physical Wi-Fi Direct (P2P) discovery and receiver
-        scope.launch(Dispatchers.IO) {
-            try {
-                wifiP2pChannel = wifiP2pManager?.initialize(context, context.mainLooper, null)
-                val filter = android.content.IntentFilter().apply {
-                    addAction(android.net.wifi.p2p.WifiP2pManager.WIFI_P2P_PEERS_CHANGED_ACTION)
-                    addAction(android.net.wifi.p2p.WifiP2pManager.WIFI_P2P_CONNECTION_CHANGED_ACTION)
-                }
-                context.registerReceiver(wifiP2pReceiver, filter)
-                
-                wifiP2pManager?.discoverPeers(wifiP2pChannel, object : android.net.wifi.p2p.WifiP2pManager.ActionListener {
-                    override fun onSuccess() {
-                        Log.d(TAG, "Wi-Fi Direct discoverPeers started")
-                    }
-                    override fun onFailure(reason: Int) {
-                        Log.e(TAG, "Wi-Fi Direct discoverPeers failed: $reason")
-                    }
-                })
-            } catch (e: Exception) {
-                Log.e(TAG, "Error initializing Wi-Fi Direct", e)
-            }
-        }
+        // 3. Start physical Wi-Fi Direct (P2P) transport
+        wifiDirectTransport.start()
 
         // 4. Start Local Bluetooth BLE advertising & scanning
         scope.launch(Dispatchers.IO) {
@@ -259,10 +232,8 @@ class ZungaMeshEngine(
                 advertiseCallback = null
                 scanCallback = null
 
-                // Unregister Wi-Fi Direct Broadcast Receiver
-                try {
-                    context.unregisterReceiver(wifiP2pReceiver)
-                } catch (e: Exception) {}
+                // Stop Wi-Fi Direct (P2P) transport
+                wifiDirectTransport.stop()
             } catch (e: Exception) {
                 Log.e(TAG, "Error stopping services", e)
             }
@@ -392,6 +363,14 @@ class ZungaMeshEngine(
                 val peerName = packet.getString("name")
                 val peerLoc = packet.getString("location")
                 val peerModel = packet.getString("deviceModel")
+                val peerPublicKey = packet.optString("publicKey")
+
+                if (peerPublicKey.isNotEmpty()) {
+                    peerPublicKeys[peerId] = peerPublicKey
+                }
+
+                val isP2pIp = socket.inetAddress.hostAddress?.startsWith("192.168.49.") == true
+                val finalConnectionType = if (isP2pIp) "WIFI_DIRECT" else "WIFI_LOCAL"
 
                 val updatedPeer = PeerEntity(
                     id = peerId,
@@ -399,7 +378,7 @@ class ZungaMeshEngine(
                     deviceModel = peerModel,
                     location = peerLoc,
                     isDirectNeighbor = true,
-                    connectionType = "WIFI",
+                    connectionType = finalConnectionType,
                     ipAddress = socket.inetAddress.hostAddress,
                     port = DEFAULT_PORT
                 )
@@ -410,6 +389,17 @@ class ZungaMeshEngine(
                     add(updatedPeer)
                 }
                 _realPeers.value = updatedList
+
+                // Update direct route in routing table
+                meshRouter.updateRoute(
+                    com.example.data.database.RouteTable(
+                        destinationNodeId = peerId,
+                        nextHopNodeId = peerId,
+                        hopCount = 1,
+                        lastSeen = System.currentTimeMillis(),
+                        connectionType = finalConnectionType
+                    )
+                )
 
                 // Read subsequent streamed packets
                 while (isActive) {
@@ -429,9 +419,13 @@ class ZungaMeshEngine(
     }
 
     /**
-     * Process received Wi-Fi packet
+     * Process received Wi-Fi packet by handing it to the MeshRouter
      */
     private fun handleIncomingPacket(packet: JSONObject) {
+        meshRouter.receivePacket(packet)
+    }
+
+    private fun processLocalPacket(packet: JSONObject) {
         try {
             when (packet.getString("type")) {
                 "CHAT" -> {
@@ -448,8 +442,41 @@ class ZungaMeshEngine(
                     val hopCount = packet.getInt("hopCount")
                     val routePath = packet.getString("routePath")
 
-                    // Content base64 decryption (AES simulated or straight)
-                    val decryptedContent = contentEncoded // Simplification for network transmission stream
+                    // Security & Decryption parsing
+                    val signature = if (packet.has("signature")) packet.getString("signature") else null
+                    val senderPublicKeyStr = if (packet.has("senderPublicKey")) packet.getString("senderPublicKey") else null
+                    val isEncrypted = packet.optBoolean("isEncrypted", false)
+                    val encryptedAESKey = if (packet.has("encryptedAESKey")) packet.getString("encryptedAESKey") else null
+                    val iv = if (packet.has("iv")) packet.getString("iv") else null
+
+                    var decryptedContent = contentEncoded
+                    var isSignatureValid = true
+
+                    if (isEncrypted && encryptedAESKey != null && iv != null && signature != null && senderPublicKeyStr != null) {
+                        // 1. Validar assinatura RSA on the ciphertext content
+                        isSignatureValid = ZungaCryptography.verify(contentEncoded, signature, senderPublicKeyStr)
+                        if (isSignatureValid) {
+                            try {
+                                // 2. Descriptografar chave AES usando chave privada do receptor
+                                val secretKey = ZungaCryptography.decryptKeyRSA(encryptedAESKey, keyPair.private)
+                                
+                                // 3. Descriptografar conteúdo usando AES e o IV explicitado
+                                decryptedContent = ZungaCryptography.decryptAESWithIv(contentEncoded, iv, secretKey)
+                            } catch (e: Exception) {
+                                Log.e(TAG, "Erro ao descriptografar dados da mensagem", e)
+                                decryptedContent = "[Erro de Descriptografia: chave ou dados inválidos]"
+                            }
+                        } else {
+                            Log.e(TAG, "Assinatura inválida na mensagem cifrada de $senderName")
+                            decryptedContent = "[Erro: Assinatura digital inválida]"
+                        }
+                    } else if (signature != null && senderPublicKeyStr != null) {
+                        // Compatibility verification for unencrypted signed packets
+                        isSignatureValid = ZungaCryptography.verify(contentEncoded, signature, senderPublicKeyStr)
+                        if (!isSignatureValid) {
+                            decryptedContent = "[Erro: Assinatura digital de texto simples inválida]"
+                        }
+                    }
 
                     val message = MessageEntity(
                         id = msgId,
@@ -478,7 +505,26 @@ class ZungaMeshEngine(
                 }
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Error parsing incoming packet", e)
+            Log.e(TAG, "Error processing local packet", e)
+        }
+    }
+
+    private fun transmitRawPacket(packet: JSONObject, nextHopId: String) {
+        scope.launch(Dispatchers.IO) {
+            val peer = _realPeers.value.find { it.id == nextHopId }
+            if (peer != null && peer.isDirectNeighbor && peer.ipAddress != null) {
+                try {
+                    val socket = Socket(peer.ipAddress, peer.port ?: DEFAULT_PORT)
+                    val writer = PrintWriter(socket.outputStream, true)
+                    writer.println(packet.toString())
+                    socket.close()
+                    Log.d(TAG, "[Network] Pacote enviado para o vizinho direto $nextHopId com sucesso.")
+                } catch (e: Exception) {
+                    Log.e(TAG, "[Network] Falha ao enviar pacote via socket para $nextHopId", e)
+                }
+            } else {
+                Log.e(TAG, "[Network] Próximo salto $nextHopId não é um vizinho direto ativo ou IP está nulo.")
+            }
         }
     }
 
@@ -500,6 +546,14 @@ class ZungaMeshEngine(
                     val peerName = handshakeIn.getString("name")
                     val peerLoc = handshakeIn.getString("location")
                     val peerModel = handshakeIn.getString("deviceModel")
+                    val peerPublicKey = handshakeIn.optString("publicKey")
+
+                    if (peerPublicKey.isNotEmpty()) {
+                        peerPublicKeys[peerId] = peerPublicKey
+                    }
+
+                    val isP2pIp = ip.startsWith("192.168.49.")
+                    val finalConnectionType = if (isP2pIp) "WIFI_DIRECT" else "WIFI_LOCAL"
 
                     val updatedPeer = PeerEntity(
                         id = peerId,
@@ -507,7 +561,7 @@ class ZungaMeshEngine(
                         deviceModel = peerModel,
                         location = peerLoc,
                         isDirectNeighbor = true,
-                        connectionType = "WIFI",
+                        connectionType = finalConnectionType,
                         ipAddress = ip,
                         port = port
                     )
@@ -518,6 +572,17 @@ class ZungaMeshEngine(
                         add(updatedPeer)
                     }
                     _realPeers.value = updatedList
+
+                    // Update direct route in routing table
+                    meshRouter.updateRoute(
+                        com.example.data.database.RouteTable(
+                            destinationNodeId = peerId,
+                            nextHopNodeId = peerId,
+                            hopCount = 1,
+                            lastSeen = System.currentTimeMillis(),
+                            connectionType = finalConnectionType
+                        )
+                    )
 
                     // Reply handshake
                     val handshakeOut = JSONObject().apply {
@@ -550,11 +615,10 @@ class ZungaMeshEngine(
     }
 
     /**
-     * Sends message over the real network socket if direct peer, or floods to all direct neighbors if group chat
+     * Sends message over the dynamic mesh network (multi-hop routing)
      */
     fun sendMessage(messageContent: String, recipientId: String, isGroupChat: Boolean = false, groupId: String? = null): MessageEntity {
         val uniqueMsgId = UUID.randomUUID().toString()
-        val signature = ZungaCryptography.sign(messageContent, keyPair.private)
 
         val message = MessageEntity(
             id = uniqueMsgId,
@@ -572,66 +636,59 @@ class ZungaMeshEngine(
             routePath = myNodeId.take(4)
         )
 
-        // Real peer packet transmission
         scope.launch(Dispatchers.IO) {
-            if (isGroupChat) {
-                // Flood the packet to ALL active real neighbors! This is real event-driven P2P routing!
-                _realPeers.value.filter { it.isDirectNeighbor && it.ipAddress != null }.forEach { peer ->
-                    try {
-                        val socket = Socket(peer.ipAddress, peer.port ?: DEFAULT_PORT)
-                        val writer = PrintWriter(socket.outputStream, true)
-                        val packet = JSONObject().apply {
-                            put("type", "CHAT")
-                            put("msgId", uniqueMsgId)
-                            put("senderId", myNodeId)
-                            put("senderName", myNodeName)
-                            put("receiverId", peer.id) // individual receiver inside packet stream
-                            put("content", messageContent)
-                            put("isGroup", true)
-                            put("groupId", groupId2String(groupId))
-                            put("messageType", "TEXT")
-                            put("timestamp", System.currentTimeMillis())
-                            put("ttl", 5)
-                            put("hopCount", 1)
-                            put("routePath", myNodeId.take(4))
+            try {
+                val packet = JSONObject().apply {
+                    put("type", "CHAT")
+                    put("msgId", uniqueMsgId)
+                    put("senderId", myNodeId)
+                    put("senderName", myNodeName)
+                    put("receiverId", if (isGroupChat) groupId!! else recipientId)
+                    put("isGroup", isGroupChat)
+                    put("groupId", groupId2String(groupId))
+                    put("messageType", "TEXT")
+                    put("timestamp", System.currentTimeMillis())
+                    put("ttl", 5)
+                    put("hopCount", 1)
+                    put("routePath", myNodeId.take(4))
+                    put("senderPublicKey", myPublicKeyString)
+                    put("visitedNodes", JSONArray().put(myNodeId))
+                    put("forwardedBy", myNodeId)
+
+                    // Encryption and security
+                    val recipientPubKeyStr = if (isGroupChat) null else peerPublicKeys[recipientId]
+                    if (recipientPubKeyStr != null) {
+                        try {
+                            val aesKey = ZungaCryptography.generateAESKey()
+                            val (cipherText, ivBase64) = ZungaCryptography.encryptAESWithIv(messageContent, aesKey)
+                            val recipientPubKey = ZungaCryptography.stringToPublicKey(recipientPubKeyStr)
+                            val encryptedAESKey = ZungaCryptography.encryptKeyRSA(aesKey, recipientPubKey)
+                            val signature = ZungaCryptography.sign(cipherText, keyPair.private)
+
+                            put("content", cipherText)
+                            put("isEncrypted", true)
+                            put("encryptedAESKey", encryptedAESKey)
+                            put("iv", ivBase64)
                             put("signature", signature)
-                            put("senderPublicKey", myPublicKeyString)
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Falha ao criptografar mensagem direta para $recipientId", e)
+                            put("content", messageContent)
+                            put("isEncrypted", false)
+                            val signature = ZungaCryptography.sign(messageContent, keyPair.private)
+                            put("signature", signature)
                         }
-                        writer.println(packet.toString())
-                        socket.close()
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Failed sending P2P group flood message to ${peer.name}", e)
+                    } else {
+                        put("content", messageContent)
+                        put("isEncrypted", false)
+                        val signature = ZungaCryptography.sign(messageContent, keyPair.private)
+                        put("signature", signature)
                     }
                 }
-            } else {
-                val peer = _realPeers.value.find { it.id == recipientId }
-                if (peer != null && peer.isDirectNeighbor && peer.ipAddress != null) {
-                    try {
-                        val socket = Socket(peer.ipAddress, peer.port ?: DEFAULT_PORT)
-                        val writer = PrintWriter(socket.outputStream, true)
-                        val packet = JSONObject().apply {
-                            put("type", "CHAT")
-                            put("msgId", uniqueMsgId)
-                            put("senderId", myNodeId)
-                            put("senderName", myNodeName)
-                            put("receiverId", recipientId)
-                            put("content", messageContent)
-                            put("isGroup", isGroupChat)
-                            put("groupId", groupId2String(groupId))
-                            put("messageType", "TEXT")
-                            put("timestamp", System.currentTimeMillis())
-                            put("ttl", 5)
-                            put("hopCount", 1)
-                            put("routePath", myNodeId.take(4))
-                            put("signature", signature)
-                            put("senderPublicKey", myPublicKeyString)
-                        }
-                        writer.println(packet.toString())
-                        socket.close()
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Failed to send packet direct over TCP socket to peer $recipientId", e)
-                    }
-                }
+
+                // Pass the packet to the meshRouter to be routed multi-hop!
+                meshRouter.receivePacket(packet)
+            } catch (e: Exception) {
+                Log.e(TAG, "Erro ao preparar pacote para envio", e)
             }
         }
 
@@ -701,7 +758,7 @@ class ZungaMeshEngine(
                 deviceModel = "Samsung Galaxy A04",
                 location = "Forte de S. Fernando, Moçâmedes",
                 isDirectNeighbor = false, // Must multi-hop through Mateus
-                connectionType = "WIFI",
+                connectionType = "WIFI_LOCAL",
                 lastSeen = System.currentTimeMillis() - 120000
             ),
             PeerEntity(
@@ -710,7 +767,7 @@ class ZungaMeshEngine(
                 deviceModel = "Xiaomi Redmi 12C",
                 location = "Torre do Tombo, Moçâmedes",
                 isDirectNeighbor = false, // Multi-hop routing
-                connectionType = "WIFI",
+                connectionType = "WIFI_LOCAL",
                 lastSeen = System.currentTimeMillis() - 80000
             ),
             PeerEntity(
@@ -719,7 +776,7 @@ class ZungaMeshEngine(
                 deviceModel = "Oppo A17",
                 location = "Aeroporto, Moçâmedes",
                 isDirectNeighbor = false,
-                connectionType = "WIFI",
+                connectionType = "WIFI_LOCAL",
                 lastSeen = System.currentTimeMillis() - 300000
             )
         )
