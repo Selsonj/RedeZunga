@@ -112,9 +112,6 @@ class ZungaViewModel(application: Application) : AndroidViewModel(application) {
     init {
         val engine = meshEngine
         if (engine != null) {
-            // Auto start mesh on boot
-            engine.startServices()
-
             // Sync local settings UI with engine
             _myNodeName.value = engine.myNodeName
             _myLocation.value = engine.myLocation

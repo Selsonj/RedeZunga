@@ -88,6 +88,8 @@ class ZungaMeshEngine(
         com.example.network.transport.WifiDirectTransport(
             context = context,
             scope = scope,
+            myNodeId = myNodeId,
+            myNodeName = myNodeName,
             onPeersDiscovered = { p2pPeers ->
                 val updatedList = _realPeers.value.toMutableList().apply {
                     removeAll { it.id.startsWith("p2p-") }
@@ -139,51 +141,65 @@ class ZungaMeshEngine(
     }
 
     /**
-     * Start rede zunga services: server socket and mDNS discovery
+     * Start rede zunga services: server socket, mDNS discovery, Wi-Fi Direct and BLE
      */
     fun startServices() {
-        if (_networkingActive.value) return
         _networkingActive.value = true
+        startTcpServer()
+        startNsd()
+        startWifiDirect()
+        startBle()
+    }
 
-        // Acquire MulticastLock to receive mDNS (NSD) packets on physical devices
-        try {
-            val wifiManager = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as? android.net.wifi.WifiManager
-            if (wifiManager != null) {
-                multicastLock = wifiManager.createMulticastLock("ZungaMeshMulticastLock").apply {
-                    setReferenceCounted(false)
-                    acquire()
-                }
-                Log.d(TAG, "Acquired WiFi MulticastLock")
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error acquiring MulticastLock", e)
-        }
-
-        // 1. Start TCP Server socket
+    fun startTcpServer() {
         scope.launch(Dispatchers.IO) {
             try {
-                serverSocket = ServerSocket(DEFAULT_PORT)
-                Log.d(TAG, "ServerSocket started on port $DEFAULT_PORT")
-                listenForSockets()
+                if (serverSocket == null || serverSocket?.isClosed == true) {
+                    serverSocket = ServerSocket(DEFAULT_PORT)
+                    Log.d(TAG, "ServerSocket started on port $DEFAULT_PORT")
+                    listenForSockets()
+                }
             } catch (e: Exception) {
                 Log.e(TAG, "Error starting local TCP server", e)
             }
         }
+    }
 
-        // 2. Start mDNS NSD local network discovery
+    fun startNsd() {
         scope.launch(Dispatchers.IO) {
             try {
-                registerNsdService()
-                startNsdDiscovery()
+                // Acquire MulticastLock to receive mDNS (NSD) packets on physical devices
+                if (multicastLock == null || multicastLock?.isHeld == false) {
+                    val wifiManager = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as? android.net.wifi.WifiManager
+                    if (wifiManager != null) {
+                        multicastLock = wifiManager.createMulticastLock("ZungaMeshMulticastLock").apply {
+                            setReferenceCounted(false)
+                            acquire()
+                        }
+                        Log.d(TAG, "Acquired WiFi MulticastLock")
+                    }
+                }
+                if (registrationListener == null) {
+                    registerNsdService()
+                }
+                if (discoveryListener == null) {
+                    startNsdDiscovery()
+                }
             } catch (e: Exception) {
                 Log.e(TAG, "Error registering NSD local network discovery", e)
             }
         }
+    }
 
-        // 3. Start physical Wi-Fi Direct (P2P) transport
-        wifiDirectTransport.start()
+    fun startWifiDirect() {
+        try {
+            wifiDirectTransport.start()
+        } catch (e: Exception) {
+            Log.e(TAG, "Error starting Wi-Fi Direct transport", e)
+        }
+    }
 
-        // 4. Start Local Bluetooth BLE advertising & scanning
+    fun startBle() {
         scope.launch(Dispatchers.IO) {
             try {
                 startBleAdvertising()
@@ -529,74 +545,94 @@ class ZungaMeshEngine(
     }
 
     /**
-     * Connect to discovered neighbor
+     * Connect to discovered neighbor with socket timeout, retry loop and proper cleanup
      */
     private fun connectToNeighbor(ip: String, port: Int, nameTag: String) {
         scope.launch(Dispatchers.IO) {
-            try {
-                val socket = Socket(ip, port)
-                val writer = PrintWriter(socket.outputStream, true)
-                val reader = BufferedReader(InputStreamReader(socket.inputStream))
+            var connected = false
+            val maxAttempts = 5
+            for (attempt in 1..maxAttempts) {
+                var socket: Socket? = null
+                try {
+                    Log.d(TAG, "[WIFI_DIRECT] Tentando conexão TCP ao peer $ip:$port ($nameTag) - tentativa $attempt/$maxAttempts...")
+                    socket = Socket()
+                    socket.connect(java.net.InetSocketAddress(ip, port), 5000)
+                    val writer = PrintWriter(socket.outputStream, true)
+                    val reader = BufferedReader(InputStreamReader(socket.inputStream))
 
-                // Exchange handshake
-                val line = reader.readLine() ?: return@launch
-                val handshakeIn = JSONObject(line)
-                if (handshakeIn.getString("type") == "HANDSHAKE") {
-                    val peerId = handshakeIn.getString("nodeId")
-                    val peerName = handshakeIn.getString("name")
-                    val peerLoc = handshakeIn.getString("location")
-                    val peerModel = handshakeIn.getString("deviceModel")
-                    val peerPublicKey = handshakeIn.optString("publicKey")
+                    // Exchange handshake
+                    val line = reader.readLine()
+                    if (line != null) {
+                        val handshakeIn = JSONObject(line)
+                        if (handshakeIn.getString("type") == "HANDSHAKE") {
+                            val peerId = handshakeIn.getString("nodeId")
+                            val peerName = handshakeIn.getString("name")
+                            val peerLoc = handshakeIn.getString("location")
+                            val peerModel = handshakeIn.getString("deviceModel")
+                            val peerPublicKey = handshakeIn.optString("publicKey")
 
-                    if (peerPublicKey.isNotEmpty()) {
-                        peerPublicKeys[peerId] = peerPublicKey
+                            if (peerPublicKey.isNotEmpty()) {
+                                peerPublicKeys[peerId] = peerPublicKey
+                            }
+
+                            val isP2pIp = ip.startsWith("192.168.49.")
+                            val finalConnectionType = if (isP2pIp) "WIFI_DIRECT" else "WIFI_LOCAL"
+
+                            val updatedPeer = PeerEntity(
+                                id = peerId,
+                                name = peerName,
+                                deviceModel = peerModel,
+                                location = peerLoc,
+                                isDirectNeighbor = true,
+                                connectionType = finalConnectionType,
+                                ipAddress = ip,
+                                port = port
+                            )
+
+                            // Add peer
+                            val updatedList = _realPeers.value.toMutableList().apply {
+                                removeAll { it.id == peerId }
+                                add(updatedPeer)
+                            }
+                            _realPeers.value = updatedList
+
+                            // Update direct route in routing table
+                            meshRouter.updateRoute(
+                                com.example.data.database.RouteTable(
+                                    destinationNodeId = peerId,
+                                    nextHopNodeId = peerId,
+                                    hopCount = 1,
+                                    lastSeen = System.currentTimeMillis(),
+                                    connectionType = finalConnectionType
+                                )
+                            )
+
+                            // Reply handshake
+                            val handshakeOut = JSONObject().apply {
+                                put("type", "HANDSHAKE")
+                                put("nodeId", myNodeId)
+                                put("name", myNodeName)
+                                put("location", myLocation)
+                                put("deviceModel", Build.MODEL)
+                                put("publicKey", myPublicKeyString)
+                            }
+                            writer.println(handshakeOut.toString())
+                            Log.d(TAG, "[WIFI_DIRECT] Handshake TCP concluído com sucesso com $peerName ($ip:$port)")
+                            connected = true
+                            break
+                        }
                     }
-
-                    val isP2pIp = ip.startsWith("192.168.49.")
-                    val finalConnectionType = if (isP2pIp) "WIFI_DIRECT" else "WIFI_LOCAL"
-
-                    val updatedPeer = PeerEntity(
-                        id = peerId,
-                        name = peerName,
-                        deviceModel = peerModel,
-                        location = peerLoc,
-                        isDirectNeighbor = true,
-                        connectionType = finalConnectionType,
-                        ipAddress = ip,
-                        port = port
-                    )
-
-                    // Add peer
-                    val updatedList = _realPeers.value.toMutableList().apply {
-                        removeAll { it.id == peerId }
-                        add(updatedPeer)
-                    }
-                    _realPeers.value = updatedList
-
-                    // Update direct route in routing table
-                    meshRouter.updateRoute(
-                        com.example.data.database.RouteTable(
-                            destinationNodeId = peerId,
-                            nextHopNodeId = peerId,
-                            hopCount = 1,
-                            lastSeen = System.currentTimeMillis(),
-                            connectionType = finalConnectionType
-                        )
-                    )
-
-                    // Reply handshake
-                    val handshakeOut = JSONObject().apply {
-                        put("type", "HANDSHAKE")
-                        put("nodeId", myNodeId)
-                        put("name", myNodeName)
-                        put("location", myLocation)
-                        put("deviceModel", Build.MODEL)
-                        put("publicKey", myPublicKeyString)
-                    }
-                    writer.println(handshakeOut.toString())
+                } catch (e: Exception) {
+                    Log.w(TAG, "[WIFI_DIRECT] Tentativa $attempt/$maxAttempts de conexão TCP ao IP $ip falhou: ${e.message}")
+                } finally {
+                    try {
+                        socket?.close()
+                    } catch (_: Exception) {}
                 }
-            } catch (e: Exception) {
-                Log.e(TAG, "Could not establish outgoing connection to resolved Peer $ip:$port", e)
+
+                if (!connected && attempt < maxAttempts) {
+                    delay(1500)
+                }
             }
         }
     }

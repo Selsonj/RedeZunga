@@ -71,9 +71,9 @@ class MainActivity : ComponentActivity() {
     ) { result ->
         if (result.resultCode == RESULT_OK) {
             Toast.makeText(this, "Bluetooth ativado com sucesso!", Toast.LENGTH_SHORT).show()
-            viewModel.meshEngine?.startServices()
+            viewModel.meshEngine?.startBle()
         } else {
-            Toast.makeText(this, "O Bluetooth deve estar ativado para a descoberta real.", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "O Bluetooth deve estar ativado para a descoberta real via BLE.", Toast.LENGTH_LONG).show()
         }
     }
 
@@ -90,15 +90,39 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun hasRequiredWifiP2pPermissions(): Boolean {
+        return if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            checkSelfPermission(android.Manifest.permission.NEARBY_WIFI_DEVICES) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        } else {
+            checkSelfPermission(android.Manifest.permission.ACCESS_FINE_LOCATION) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        }
+    }
+
+    private fun checkHardwareStatus() {
+        val wifiManager = applicationContext.getSystemService(android.content.Context.WIFI_SERVICE) as? android.net.wifi.WifiManager
+        if (wifiManager != null && !wifiManager.isWifiEnabled) {
+            Toast.makeText(this, "Aviso: O Wi-Fi está desligado. Ative o Wi-Fi para que a rede mesh offline funcione.", Toast.LENGTH_LONG).show()
+        }
+        if (android.os.Build.VERSION.SDK_INT <= android.os.Build.VERSION_CODES.S_V2) {
+            val locationManager = getSystemService(android.content.Context.LOCATION_SERVICE) as? android.location.LocationManager
+            val isGpsEnabled = locationManager?.isProviderEnabled(android.location.LocationManager.GPS_PROVIDER) == true
+            val isNetEnabled = locationManager?.isProviderEnabled(android.location.LocationManager.NETWORK_PROVIDER) == true
+            if (!isGpsEnabled && !isNetEnabled) {
+                Toast.makeText(this, "Aviso: No Android 12 ou inferior, ative a Localização do dispositivo para o Wi-Fi Direct funcionar.", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
     private val requestPermissionLauncher = registerForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions()
     ) { results ->
-        val deniedCount = results.filter { !it.value }.size
-        if (deniedCount == 0) {
+        if (hasRequiredWifiP2pPermissions()) {
             Toast.makeText(this, "Permissões de rede próxima concedidas!", Toast.LENGTH_SHORT).show()
+            checkHardwareStatus()
+            viewModel.meshEngine?.startServices()
             checkAndPromptBluetooth()
         } else {
-            Toast.makeText(this, "Algumas permissões foram negadas. O funcionamento offline total pode ser afetado.", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "As permissões de rede próxima são necessárias para a comunicação offline.", Toast.LENGTH_LONG).show()
         }
     }
 
@@ -117,13 +141,18 @@ class MainActivity : ComponentActivity() {
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
             permissions.add(android.Manifest.permission.NEARBY_WIFI_DEVICES)
         }
-        requestPermissionLauncher.launch(permissions.toTypedArray())
 
-        val hasBtConnect = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
-            checkSelfPermission(android.Manifest.permission.BLUETOOTH_CONNECT) == android.content.pm.PackageManager.PERMISSION_GRANTED
-        } else true
-        if (hasBtConnect) {
-            checkAndPromptBluetooth()
+        if (hasRequiredWifiP2pPermissions()) {
+            checkHardwareStatus()
+            viewModel.meshEngine?.startServices()
+            val hasBtConnect = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+                checkSelfPermission(android.Manifest.permission.BLUETOOTH_CONNECT) == android.content.pm.PackageManager.PERMISSION_GRANTED
+            } else true
+            if (hasBtConnect) {
+                checkAndPromptBluetooth()
+            }
+        } else {
+            requestPermissionLauncher.launch(permissions.toTypedArray())
         }
 
         enableEdgeToEdge()
